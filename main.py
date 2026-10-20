@@ -14,6 +14,7 @@ from qdrant_client import QdrantClient
 # from qdrant_client.models import Distance, VectorParams, PointStruct, Document
 from langchain.chat_models import init_chat_model
 
+import uvicorn
 from typing import Annotated
 from fastapi import FastAPI, File, Form, UploadFile, HTTPException
 
@@ -41,9 +42,21 @@ class UploadFileResponse(BaseModel):
 
 load_dotenv()
 EMBED_MODEL_ID = os.getenv("EMBED_MODEL_ID")
+# Initialize the embedding model
+embeddings = FastEmbedEmbeddings(model_name=EMBED_MODEL_ID)
+
 QDRANT_URL=os.getenv("QDRANT_URL")
 QDRANT_API_KEY=os.getenv("QDRANT_API_KEY")
-
+# Initialize the Qdrant client
+qdrant = QdrantVectorStore.from_existing_collection(
+    embedding=embeddings,
+    prefer_grpc=True,
+    collection_name="my-RAG-collection",
+    url=QDRANT_URL,
+    api_key=QDRANT_API_KEY,
+    vector_name="dense",
+    retrieval_mode=RetrievalMode.DENSE,
+)
 
 app = FastAPI()
 
@@ -115,21 +128,9 @@ async def create_upload_file(
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Error saving document to Qdrant: {str(e)}")
 
-    # Initialize the embedding model
-    embeddings = FastEmbedEmbeddings(model_name=EMBED_MODEL_ID)
-
     # Initialize and Save Qdrant Store using Qdrant Cloud
     try:
-        qdrant = QdrantVectorStore.from_documents(
-            docs,
-            embeddings,
-            url=QDRANT_URL,
-            prefer_grpc=True,
-            api_key=QDRANT_API_KEY,
-            collection_name="my-RAG-collection",
-            retrieval_mode=RetrievalMode.DENSE,
-            vector_name="dense",
-        )
+        qdrant.add_documents(documents=docs)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error saving documents to Qdrant: {str(e)}")
 
@@ -143,46 +144,22 @@ async def create_upload_file(
     )
     
 
-class RAGRequest(BaseModel):
-    """Deterministic inbound contract for the /query endpoint (V1 foundation)."""
-    question: str = Field(
-        ...,
-        min_length=1,
-        max_length=1000,
-        description="User question for the RAG pipeline.",
-    )
-    top_k: int = Field(
-        default=3,
-        ge=1,
-        le=20,
-        description="Number of chunks to retrieve (bounded 1-20).",
-    )
-    category: DocumentCategory | None = Field(
-        default=None,
-        description="Optional metadata pre-filter (e.g. only search the resume).",
-    )
+# ── Step 3：Retrieve ──────────────────────────────────────────
+# QdrantClient vs QdrantVectorStore（一句分清）：
+#   QdrantClient      = Qdrant 官方 raw client：講「向量 list + payload dict」，
+#                       識建/刪 collection、upsert、scroll raw points（我哋 /tmp 驗證 script 用佢）
+#   QdrantVectorStore = LangChain 包裝住 QdrantClient：識 Document、識 Embeddings
+#                       （文字↔向量自動轉）、識 filter dict、駁到 chain/agent 做 retriever
+# 分工：RAG 讀寫用 VectorStore；管倉（建/刪/驗證）先直接用 QdrantClient。
 
 
-# def save_documents_to_qdrant():
-#     loader = DoclingLoader(
-#         file_path="path",
-#         export_type="",
-#         chunker=HybridChunker(chunk_size=500, chunk_overlap=50)
-#     )
-#     docs = loader.load()
+@app.post("/retrieve")
+async def retrieve():
+    return {"message": "Retrieve endpoint"}
 
 def main() -> None:
-    request = RAGRequest(question="What is RAG?", top_k=3)
-    print("Valid request  ->", request.model_dump())
-
-    # Pydantic acts as a strict border guard: out-of-range values are rejected
-    # BEFORE any expensive retrieval or LLM call is ever made.
-    try:
-        bad_request = RAGRequest(question="What is RAG?", top_k=99)
-        print("This line is never reached ->", bad_request)
-    except ValidationError as exc:
-        print("Rejected bad request (top_k=99 out of range):")
-        print(exc)
+    uvicorn.run(app, host="localhost", port=8000)
+    
 
 @app.get("/")
 async def root():
